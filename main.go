@@ -71,9 +71,9 @@ func getUserData() (*GameServerUserData, error) {
 		return nil, err
 	}
 
-	sliced := strings.Split(string(data), "|")
+	sliced := strings.Split(strings.Trim(string(data), "\n"), "|")
 
-	if len(sliced) != 5 {
+	if len(sliced) != 8 {
 		return nil, fmt.Errorf("user data was malformed or not complete")
 	}
 
@@ -100,7 +100,13 @@ func getUserData() (*GameServerUserData, error) {
 }
 
 func checkTermination(userData *GameServerUserData) {
-	// We will return immediately, but keep this check running.
+	_, err := os.Stat(userData.StopPath)
+	if err != nil {
+		// if the stop path doesn't exit, no reason to run the goroutine
+		return
+	}
+
+	// Spin this off in a goroutine
 	go func() {
 		resp, err := http.Get("http://169.254.169.254/latest/meta-data/spot/termination-time")
 		if err != nil {
@@ -109,23 +115,64 @@ func checkTermination(userData *GameServerUserData) {
 			if resp.StatusCode != 404 {
 				fmt.Printf("We got notification of termination. Calling stop and exiting.\n")
 				cmd := exec.Command(userData.StopPath)
-				err := cmd.Start()
+				err := cmd.Run()
 				if err != nil {
-					fmt.Printf("Error trying to call stop: %s\n", err.Error())
-				} else {
-					err := cmd.Wait()
-					if err != nil {
-						fmt.Printf("Stop call returned error: %s\n", err.Error())
-					}
-					fmt.Printf("Exiting.")
-					os.Exit(0)
+					fmt.Printf("Error calling stop: %s\n", err.Error())
 				}
+				fmt.Printf("Exiting.")
+				os.Exit(0)
 			}
 			resp.Body.Close()
 		}
 
 		// Sleep 5 seconds and check again.
 		time.Sleep(5 * time.Second)
+	}()
+}
+
+func checkIdle(userData *GameServerUserData) {
+	_, err := os.Stat(userData.IdlePath)
+	if err != nil {
+		// If the idle path doesn't exit, no reason to run the goroutine
+		return
+	}
+
+	_, err = os.Stat(userData.StopPath)
+	if err != nil {
+		// if the stop path doesn't exit, no reason to run the goroutine
+		return
+	}
+
+	// Spin this off in a goroutine
+	go func() {
+		count := 0
+		for {
+			// Call the idle script. If the exit status is 0, the game server is idle and should count this iteration.
+			// Otherwise, the server is not idle and we reset the count.
+			cmd := exec.Command(userData.IdlePath)
+			err := cmd.Run()
+			if err != nil {
+				// exit status != 0, game server is not idle, reset the count.
+				fmt.Println("Game server active, resetting count.")
+				count = 0
+			} else {
+				// exit status == 0, game server is idle, increment the count and check the threshold.
+				fmt.Println("Game server idle, incrementing count.")
+				count = count + 1
+				if count >= userData.IdleConsecutiveTimesForShutdown {
+					// We have been idle too long. Shutdown.
+					fmt.Printf("Game server has been idle too long. Calling stop and exiting.\n")
+					cmd := exec.Command(userData.StopPath)
+					err := cmd.Run()
+					if err != nil {
+						fmt.Printf("Error calling stop: %s\n", err.Error())
+					}
+					fmt.Printf("Exiting.")
+					os.Exit(0)
+				}
+			}
+			time.Sleep(time.Duration(userData.IdleInterval) * time.Second)
+		}
 	}()
 }
 
@@ -226,6 +273,27 @@ func mountVolume(userData *GameServerUserData, instanceID string, sess *session.
 	return nil
 }
 
+func startGame(userData *GameServerUserData) error {
+	_, err := os.Stat(userData.RunPath)
+	if err != nil {
+		return fmt.Errorf("error starting game server: %s", err.Error())
+	}
+
+	fmt.Println("Starting game server.")
+	//	screen := "/usr/bin/screen -dm -S gameserver /bin/bash " + userData.RunPath
+	//	cmd := exec.Command("/bin/su", "ubuntu", "-c", screen)
+	cmd := exec.Command("/bin/su", "ubuntu", "-c", userData.RunPath)
+	cmd.Stdout = os.Stdout
+
+	err = cmd.Run()
+	if err != nil {
+		return fmt.Errorf("game server returned error: %s", err.Error())
+	}
+
+	fmt.Println("Game server done.")
+	return nil
+}
+
 func main() {
 	fmt.Println("Getting user data.")
 	userData, err := getUserData()
@@ -255,5 +323,12 @@ func main() {
 		fmt.Printf("Error mounting volume: %s\n", err.Error())
 	}
 
-	//checkTermination(userData)
+	checkTermination(userData)
+
+	checkIdle(userData)
+
+	err = startGame(userData)
+	if err != nil {
+		fmt.Printf("Error starting game: %s\n", err.Error())
+	}
 }
