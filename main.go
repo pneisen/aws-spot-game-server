@@ -119,8 +119,7 @@ func checkTermination(userData *GameServerUserData) {
 				if err != nil {
 					fmt.Printf("Error calling stop: %s\n", err.Error())
 				}
-				fmt.Printf("Exiting.")
-				os.Exit(0)
+				return
 			}
 			resp.Body.Close()
 		}
@@ -130,7 +129,7 @@ func checkTermination(userData *GameServerUserData) {
 	}()
 }
 
-func checkIdle(userData *GameServerUserData) {
+func checkIdle(userData *GameServerUserData, instanceID string, sess *session.Session) {
 	_, err := os.Stat(userData.IdlePath)
 	if err != nil {
 		// If the idle path doesn't exit, no reason to run the goroutine
@@ -167,8 +166,20 @@ func checkIdle(userData *GameServerUserData) {
 					if err != nil {
 						fmt.Printf("Error calling stop: %s\n", err.Error())
 					}
-					fmt.Printf("Exiting.")
-					os.Exit(0)
+
+					// Terminate the instance as well.
+					service := ec2.New(sess)
+
+					input := &ec2.TerminateInstancesInput{
+						DryRun:      aws.Bool(false),
+						InstanceIds: []*string{aws.String(instanceID)},
+					}
+
+					_, err = service.TerminateInstances(input)
+					if err != nil {
+						fmt.Printf("Terminating instances failed: %s\n", err.Error())
+					}
+					return
 				}
 			}
 			time.Sleep(time.Duration(userData.IdleInterval) * time.Second)
@@ -234,8 +245,8 @@ func mountVolume(userData *GameServerUserData, instanceID string, sess *session.
 	fmt.Println("Volume attached. Looking for device file")
 	found := false
 	deviceFile := ""
-	// Try up to five times.
-	for i := 0; i < 5; i++ {
+	// Try up to ten times.
+	for i := 0; i < 10; i++ {
 		_, err = os.Stat("/dev/xvdf")
 		_, err2 := os.Stat("/dev/nvme1n1")
 		if err == nil || err2 == nil {
@@ -247,7 +258,7 @@ func mountVolume(userData *GameServerUserData, instanceID string, sess *session.
 			}
 			break
 		}
-		time.Sleep(1 * time.Second)
+		time.Sleep(2 * time.Second)
 	}
 
 	if !found {
@@ -316,16 +327,18 @@ func main() {
 	err = setDNS(userData, sess)
 	if err != nil {
 		fmt.Printf("Error setting DNS: %s\n", err.Error())
+		os.Exit(1)
 	}
 
 	err = mountVolume(userData, instanceID, sess)
 	if err != nil {
 		fmt.Printf("Error mounting volume: %s\n", err.Error())
+		os.Exit(1)
 	}
 
 	checkTermination(userData)
 
-	checkIdle(userData)
+	checkIdle(userData, instanceID, sess)
 
 	err = startGame(userData)
 	if err != nil {
