@@ -245,8 +245,8 @@ func mountVolume(userData *GameServerUserData, instanceID string, sess *session.
 	fmt.Println("Volume attached. Looking for device file")
 	found := false
 	deviceFile := ""
-	// Try up to ten times.
-	for i := 0; i < 10; i++ {
+	// Try for up to 2 minutes
+	for i := 0; i < 24; i++ {
 		_, err = os.Stat("/dev/xvdf")
 		_, err2 := os.Stat("/dev/nvme1n1")
 		if err == nil || err2 == nil {
@@ -258,7 +258,7 @@ func mountVolume(userData *GameServerUserData, instanceID string, sess *session.
 			}
 			break
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
 
 	if !found {
