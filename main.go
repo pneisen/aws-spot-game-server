@@ -231,15 +231,29 @@ func mountVolume(userData *GameServerUserData, instanceID string, sess *session.
 	service := ec2.New(sess)
 
 	fmt.Println("Attaching volume.")
-	input := &ec2.AttachVolumeInput{
-		Device:     aws.String("/dev/sdf"),
-		InstanceId: aws.String(instanceID),
-		VolumeId:   aws.String(userData.VolumeID),
+
+	// Try for up to 2 minutes
+	attached := false
+	for i := 0; i < 24; i++ {
+		input := &ec2.AttachVolumeInput{
+			Device:     aws.String("/dev/sdf"),
+			InstanceId: aws.String(instanceID),
+			VolumeId:   aws.String(userData.VolumeID),
+		}
+
+		_, err := service.AttachVolume(input)
+
+		if err != nil {
+			fmt.Printf("Error attaching volume: %s\n", err.Error())
+		} else {
+			attached = true
+			break
+		}
+		time.Sleep(5 * time.Second)
 	}
 
-	_, err := service.AttachVolume(input)
-	if err != nil {
-		return fmt.Errorf("error attaching volume: %s", err.Error())
+	if !attached {
+		return fmt.Errorf("errors attaching volume - giving up")
 	}
 
 	fmt.Println("Volume attached. Looking for device file")
@@ -247,7 +261,7 @@ func mountVolume(userData *GameServerUserData, instanceID string, sess *session.
 	deviceFile := ""
 	// Try for up to 2 minutes
 	for i := 0; i < 24; i++ {
-		_, err = os.Stat("/dev/xvdf")
+		_, err := os.Stat("/dev/xvdf")
 		_, err2 := os.Stat("/dev/nvme1n1")
 		if err == nil || err2 == nil {
 			found = true
@@ -267,7 +281,7 @@ func mountVolume(userData *GameServerUserData, instanceID string, sess *session.
 
 	fmt.Println("Creating mount point.")
 	oldUMask := syscall.Umask(0)
-	err = os.Mkdir("/mnt/game", 0777)
+	err := os.Mkdir("/mnt/game", 0777)
 	if err != nil {
 		return fmt.Errorf("error creating mount point: %s", err.Error())
 	}
