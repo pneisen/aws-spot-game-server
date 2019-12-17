@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/route53"
@@ -29,49 +29,30 @@ type GameServerUserData struct {
 	IdleConsecutiveTimesForShutdown int
 }
 
-func getInstanceID() (string, error) {
-	resp, err := http.Get("http://169.254.169.254/latest/meta-data/instance-id")
-	if err != nil {
-		return "", err
-	}
-
-	id, err := ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return "", err
-	}
-
-	return string(id), nil
+func getInstanceRegion(metadata *ec2metadata.EC2Metadata) (string, error) {
+	region, err := metadata.Region()
+	return region, err
 }
 
-func getPublicIP() (string, error) {
-	resp, err := http.Get("http://169.254.169.254/latest/meta-data/public-ipv4")
-	if err != nil {
-		return "", err
-	}
+func getInstanceID(metadata *ec2metadata.EC2Metadata) (string, error) {
+	id, err := metadata.GetMetadata("instance-id")
 
-	ip, err := ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return "", err
-	}
-
-	return string(ip), nil
+	return id, err
 }
 
-func getUserData() (*GameServerUserData, error) {
-	resp, err := http.Get("http://169.254.169.254/latest/user-data")
+func getPublicIP(metadata *ec2metadata.EC2Metadata) (string, error) {
+	publicIP, err := metadata.GetMetadata("public-ipv4")
+
+	return string(publicIP), err
+}
+
+func getUserData(metadata *ec2metadata.EC2Metadata) (*GameServerUserData, error) {
+	userData, err := metadata.GetUserData()
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return nil, err
-	}
-
-	sliced := strings.Split(strings.Trim(string(data), "\n"), "|")
+	sliced := strings.Split(strings.Trim(string(userData), "\n"), "|")
 
 	if len(sliced) != 8 {
 		return nil, fmt.Errorf("user data was malformed or not complete")
@@ -108,6 +89,7 @@ func checkTermination(userData *GameServerUserData) {
 
 	// Spin this off in a goroutine
 	go func() {
+		// TODO: Replace with a call to the metadata and use spot/instance-action.
 		resp, err := http.Get("http://169.254.169.254/latest/meta-data/spot/termination-time")
 		if err != nil {
 			fmt.Printf("Error getting termination time: %s\n", err.Error())
@@ -187,9 +169,9 @@ func checkIdle(userData *GameServerUserData, instanceID string, sess *session.Se
 	}()
 }
 
-func setDNS(userData *GameServerUserData, sess *session.Session) error {
+func setDNS(userData *GameServerUserData, metadata *ec2metadata.EC2Metadata, sess *session.Session) error {
 	fmt.Println("Getting public ip.")
-	publicIP, err := getPublicIP()
+	publicIP, err := getPublicIP(metadata)
 	if err != nil {
 		return fmt.Errorf("error getting public IP: %s", err.Error())
 	}
@@ -320,25 +302,32 @@ func startGame(userData *GameServerUserData) error {
 }
 
 func main() {
+	metadata := ec2metadata.New(session.New())
+
 	fmt.Println("Getting user data.")
-	userData, err := getUserData()
+	userData, err := getUserData(metadata)
 	if err != nil {
 		fmt.Printf("Error getting user data: %s\n", err.Error())
 		os.Exit(1)
 	}
 
+	fmt.Println("Getting instance region.")
+	region, err := getInstanceRegion(metadata)
+	if err != nil {
+		fmt.Printf("Error getting instance region: %s\n", err.Error())
+		os.Exit(1)
+	}
+
 	fmt.Println("Getting instance id.")
-	instanceID, err := getInstanceID()
+	instanceID, err := getInstanceID(metadata)
 	if err != nil {
 		fmt.Printf("Error getting instance ID: %s\n", err.Error())
 		os.Exit(1)
 	}
 
-	sess := session.Must(session.NewSessionWithOptions(session.Options{
-		SharedConfigState: session.SharedConfigEnable,
-	}))
+	sess := session.Must(session.NewSession(&aws.Config{Region: aws.String(region)}))
 
-	err = setDNS(userData, sess)
+	err = setDNS(userData, metadata, sess)
 	if err != nil {
 		fmt.Printf("Error setting DNS: %s\n", err.Error())
 		os.Exit(1)
